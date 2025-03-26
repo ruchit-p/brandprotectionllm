@@ -1,0 +1,20 @@
+# Backend
+backend/venv/
+backend/app/__pycache__/
+backend/lib/jplag.jar
+
+# Frontend
+frontend/node_modules/
+
+# Docker
+docker-compose.yml
+
+# Environment variables
+.env
+
+# Logs
+logs/
+
+# Cache
+cache/
+
