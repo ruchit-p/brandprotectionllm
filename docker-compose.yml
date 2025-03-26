@@ -1,0 +1,324 @@
+version: '3.8'
+
+services:
+  db:
+    image: postgres:14-alpine
+    environment:
+      POSTGRES_USER: ${DB_USER:-postgres}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-postgres}
+      POSTGRES_DB: ${DB_NAME:-brand_protection}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./db/schema.sql:/docker-entrypoint-initdb.d/schema.sql
+    networks:
+      - app-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    networks:
+      - app-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  worker-rekognition:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    command: celery -A app.celery_worker worker -Q rekognition -l info -n rekognition@%h
+    volumes:
+      - ./backend:/app
+      - ./storage:/app/storage
+    depends_on:
+      - db
+      - redis
+    env_file:
+      - .env
+    networks:
+      - app-network
+
+  worker-analysis:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    command: celery -A app.celery_worker worker -Q analysis -l info -n analysis@%h
+    volumes:
+      - ./backend:/app
+      - ./storage:/app/storage
+    depends_on:
+      - db
+      - redis
+    env_file:
+      - .env
+    networks:
+      - app-network
+
+  worker-maintenance:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    command: celery -A app.celery_worker worker -Q maintenance -l info -n maintenance@%h
+    volumes:
+      - ./backend:/app
+      - ./storage:/app/storage
+    depends_on:
+      - db
+      - redis
+    env_file:
+      - .env
+    networks:
+      - app-network
+
+  scheduler:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    command: celery -A app.celery_worker beat -l info --scheduler redbeat.RedBeatScheduler
+    volumes:
+      - ./backend:/app
+    depends_on:
+      - db
+      - redis
+      - worker-rekognition
+      - worker-analysis
+      - worker-maintenance
+    env_file:
+      - .env
+    networks:
+      - app-network
+
+  flower:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    command: celery -A app.celery_worker flower --port=5555
+    ports:
+      - "5555:5555"
+    depends_on:
+      - db
+      - redis
+      - worker-rekognition
+      - worker-analysis
+    env_file:
+      - .env
+    networks:
+      - app-network
+
+  api:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+    volumes:
+      - ./backend:/app
+      - ./storage:/app/storage
+    ports:
+      - "8000:8000"
+    depends_on:
+      - db
+      - redis
+    env_file:
+      - .env
+    networks:
+      - app-network
+
+  qdrant:
+    image: qdrant/qdrant:latest
+    ports:
+      - "6333:6333"
+      - "6334:6334"
+    volumes:
+      - qdrant_data:/qdrant/storage
+    environment:
+      - QDRANT_ALLOW_CREATION_ON_FILE_ABSENCE=true
+
+  ollama:
+    image: ollama/ollama:latest
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+  firecrawl:
+    build:
+      context: ./firecrawl
+      dockerfile: Dockerfile.firecrawl
+    depends_on:
+      - redis
+    environment:
+      - REDIS_URL=redis://redis:6379/0
+    volumes:
+      - ./firecrawl:/app
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./backend:/app
+    environment:
+      - DATABASE_URL=postgresql://postgres:postgres@db:5432/brand_protection
+      - REDIS_URL=redis://redis:6379/0
+      - QDRANT_URL=http://qdrant:6333
+      - OLLAMA_BASE_URL=http://ollama:11434
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}
+      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
+      - AWS_REGION=${AWS_REGION}
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      qdrant:
+        condition: service_started
+      ollama:
+        condition: service_started
+
+  celery_rekognition:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.celery
+    command: celery -A app.celery_app worker --loglevel=info --concurrency=2 -Q rekognition
+    volumes:
+      - ./backend:/app
+    environment:
+      - DATABASE_URL=postgresql://postgres:postgres@db:5432/brand_protection
+      - REDIS_URL=redis://redis:6379/0
+      - QDRANT_URL=http://qdrant:6333
+      - OLLAMA_BASE_URL=http://ollama:11434
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}
+      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
+      - AWS_REGION=${AWS_REGION}
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      backend:
+        condition: service_started
+      ollama:
+        condition: service_started
+
+  celery_analysis:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.celery
+    command: celery -A app.celery_app worker --loglevel=info --concurrency=4 -Q analysis
+    volumes:
+      - ./backend:/app
+    environment:
+      - DATABASE_URL=postgresql://postgres:postgres@db:5432/brand_protection
+      - REDIS_URL=redis://redis:6379/0
+      - QDRANT_URL=http://qdrant:6333
+      - OLLAMA_BASE_URL=http://ollama:11434
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      backend:
+        condition: service_started
+      ollama:
+        condition: service_started
+
+  celery_maintenance:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.celery
+    command: celery -A app.celery_app worker --loglevel=info --concurrency=1 -Q maintenance
+    volumes:
+      - ./backend:/app
+    environment:
+      - DATABASE_URL=postgresql://postgres:postgres@db:5432/brand_protection
+      - REDIS_URL=redis://redis:6379/0
+      - OLLAMA_BASE_URL=http://ollama:11434
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      backend:
+        condition: service_started
+      ollama:
+        condition: service_started
+
+  celery_beat:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.celery
+    command: celery -A app.celery_app beat --loglevel=info
+    volumes:
+      - ./backend:/app
+    environment:
+      - DATABASE_URL=postgresql://postgres:postgres@postgres:5432/brand_protection
+      - REDIS_URL=redis://redis:6379/0
+    depends_on:
+      - redis
+      - backend
+
+  flower_celery:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.celery
+    command: celery -A app.celery_app flower --port=5555
+    ports:
+      - "5555:5555"
+    environment:
+      - REDIS_URL=redis://redis:6379/0
+    depends_on:
+      - redis
+      - celery_rekognition
+      - celery_analysis
+      - celery_maintenance
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+    environment:
+      - NEXT_PUBLIC_API_URL=http://localhost:8000
+    depends_on:
+      - backend
+
+networks:
+  app-network:
+    driver: bridge
+
+volumes:
+  postgres_data:
+  redis_data:
+  qdrant_data:
+  ollama_data: 

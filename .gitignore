@@ -5,9 +5,6 @@ backend/app/__pycache__/
 # Frontend
 frontend/node_modules/
 
-# Docker
-docker-compose.yml
-
 # Environment variables
 .env
 
