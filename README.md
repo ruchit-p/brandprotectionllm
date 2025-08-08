@@ -146,9 +146,12 @@ docker-compose up -d
 3. **Dashboard**: Review flagged websites and examine evidence of potential infringement.
 4. **Actions**: Confirm genuine infringements or dismiss false positives.
 
-## License
+## Governance & Policies
 
-[MIT](LICENSE)
+- See `LICENSE` (MIT) for licensing details.
+- See `CODE_OF_CONDUCT.md` for community standards.
+- See `CONTRIBUTING.md` to get started with contributions.
+- See `SECURITY.md` for responsible disclosure.
 
 ## Acknowledgments
 
